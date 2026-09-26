@@ -1,0 +1,10 @@
+# 配置模板：复制为 config.yaml（已被 .gitignore 忽略）并按环境填写。
+# 密钥 jwt_secret 入文件是团队决策，注意文件权限。
+addr: 127.0.0.1:8080
+mysql_dsn: root:@tcp(127.0.0.1:3306)/go_clean_template?charset=utf8mb4&parseTime=true&loc=Local
+jwt_secret: change-me
+access_ttl: 30m
+refresh_ttl: 720h
+log:
+  format: json # text | json，本地开发建议 text，生产 json
+  level: info # debug | info | warn | error

@@ -1,0 +1,33 @@
+# 开发环境编排：MySQL + 后端 API，docker compose up -d 一键起。
+# 仅供本地开发：root 空密码、固定 JWT_SECRET，生产部署另配。
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ALLOW_EMPTY_PASSWORD: "yes" # 对齐后端默认 DSN（root 空密码）
+      MYSQL_DATABASE: go_clean_template
+    ports:
+      - "3306:3306" # 暴露给宿主机，本地裸跑 go run 也连得上
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  backend:
+    build: ./backend
+    volumes:
+      # 配置全量走 config.yaml: 挂载注入：挂载注入，容器内工作目录读取
+      - ./backend/config.yaml:/srv/config.yaml:ro
+    working_dir: /srv
+    command: [/server]
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
