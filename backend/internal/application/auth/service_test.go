@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"go-clean-template/backend/internal/application/auth/dto"
 	"go-clean-template/backend/internal/domain/user/fakes"
 	"go-clean-template/backend/internal/kernel/apperr"
 )
@@ -36,7 +37,7 @@ func TestRegisterLoginRefreshLogout(t *testing.T) {
 	}
 
 	// 注册成功：默认昵称取邮箱前缀、令牌对可解析
-	res, err := svc.Register(ctx, "alice@example.com", "password123", "")
+	res, err := svc.Register(ctx, dto.RegisterInput{Email: "alice@example.com", Password: "password123", Nickname: ""})
 	if err != nil {
 		t.Fatalf("注册失败: %v", err)
 	}
@@ -46,45 +47,43 @@ func TestRegisterLoginRefreshLogout(t *testing.T) {
 	if len(res.Tokens.Access) == 0 || len(res.Tokens.Refresh) != 64 {
 		t.Errorf("令牌形态异常: access=%d refresh=%d", len(res.Tokens.Access), len(res.Tokens.Refresh))
 	}
-	if id, err := svc.Authenticate(res.Tokens.Access); err != nil || id != res.User.ID {
+	if id, err := svc.Authenticate(context.Background(), dto.AuthenticateInput{AccessToken: res.Tokens.Access}); err != nil || id != res.User.ID {
 		t.Errorf("access token 无法还原用户: id=%d err=%v", id, err)
 	}
 
 	// 重复注册同邮箱冲突
-	if _, err := svc.Register(ctx, "alice@example.com", "password123", ""); !errors.Is(err, apperr.ErrEmailTaken) {
+	if _, err := svc.Register(ctx, dto.RegisterInput{Email: "alice@example.com", Password: "password123", Nickname: ""}); !errors.Is(err, apperr.ErrEmailTaken) {
 		t.Fatalf("重复邮箱应 ErrEmailTaken，得到 %v", err)
 	}
-	// 登录：错误密码产出 bad_credentials；不存在邮箱产出事实码 user_not_found，
-	// 由表现层合码为 bad_credentials，应用层二者不同码便于日志归因。
-	if _, err := svc.Login(ctx, "alice@example.com", "wrongpass1"); !errors.Is(err, apperr.ErrBadCredentials) {
+	// 邮箱不存在与密码错误在用例内统一为 bad_credentials，日志 op 仍可区分。
+	if _, err := svc.Login(ctx, dto.LoginInput{Email: "alice@example.com", Password: "wrongpass1"}); !errors.Is(err, apperr.ErrBadCredentials) {
 		t.Fatalf("错误密码应 ErrBadCredentials，得到 %v", err)
 	}
-	if _, err := svc.Login(ctx, "nobody@example.com", "password123"); !errors.Is(err, apperr.ErrUserNotFound) {
-		t.Fatalf("不存在邮箱应 ErrUserNotFound，得到 %v", err)
+	if _, err := svc.Login(ctx, dto.LoginInput{Email: "nobody@example.com", Password: "password123"}); !errors.Is(err, apperr.ErrBadCredentials) {
+		t.Fatalf("不存在邮箱应 ErrBadCredentials，得到 %v", err)
 	}
-	login, err := svc.Login(ctx, "alice@example.com", "password123")
+	login, err := svc.Login(ctx, dto.LoginInput{Email: "alice@example.com", Password: "password123"})
 	if err != nil {
 		t.Fatalf("登录失败: %v", err)
 	}
-	if _, err := svc.Authenticate(login.Tokens.Access); err != nil {
+	if _, err := svc.Authenticate(context.Background(), dto.AuthenticateInput{AccessToken: login.Tokens.Access}); err != nil {
 		t.Errorf("登录签发的 access 无效: %v", err)
 	}
 
-	// 刷新：旧 refresh 换新对；登出后同 token 再刷产出事实码（凭据已吊销），
-	// 表现层合码为 unauthorized。
-	pair, err := svc.Refresh(ctx, login.Tokens.Refresh)
+	// 刷新：旧 refresh 换新对；登出后同 token 再刷在用例内返回 unauthorized。
+	pair, err := svc.Refresh(ctx, dto.RefreshInput{RefreshToken: login.Tokens.Refresh})
 	if err != nil {
 		t.Fatalf("刷新失败: %v", err)
 	}
-	if err := svc.Logout(ctx, pair.Refresh); err != nil {
+	if err := svc.Logout(ctx, dto.LogoutInput{RefreshToken: pair.Refresh}); err != nil {
 		t.Fatalf("登出失败: %v", err)
 	}
-	if _, err := svc.Refresh(ctx, pair.Refresh); !errors.Is(err, apperr.ErrRefreshTokenNotFound) {
-		t.Fatalf("登出后刷新应 ErrRefreshTokenNotFound，得到 %v", err)
+	if _, err := svc.Refresh(ctx, dto.RefreshInput{RefreshToken: pair.Refresh}); !errors.Is(err, apperr.ErrUnauthorized) {
+		t.Fatalf("登出后刷新应 ErrUnauthorized，得到 %v", err)
 	}
 }
 
-// TestRegisterUnclassifiedConflict 验证白名单外写入冲突透传 database_error，
+// TestRegisterUnclassifiedConflict 验证白名单外写入冲突透传 internal_error，
 // 不被误报为邮箱占用。
 func TestRegisterUnclassifiedConflict(t *testing.T) {
 	users := &fakes.UnknownDupUsers{Users: fakes.NewUsers()}
@@ -96,8 +95,8 @@ func TestRegisterUnclassifiedConflict(t *testing.T) {
 		t.Fatalf("构造服务失败: %v", err)
 	}
 
-	if _, err := svc.Register(context.Background(), "x@example.com", "password123", ""); !errors.Is(err, apperr.ErrDatabase) {
-		t.Fatalf("未识别冲突应为 database_error，得到 %v", err)
+	if _, err := svc.Register(context.Background(), dto.RegisterInput{Email: "x@example.com", Password: "password123", Nickname: ""}); !errors.Is(err, apperr.ErrInternal) {
+		t.Fatalf("未识别冲突应为 internal_error，得到 %v", err)
 	}
 	if errors.Is(err, apperr.ErrEmailTaken) {
 		t.Fatal("未识别冲突不得误报 email_taken")
@@ -119,11 +118,11 @@ func TestRegisterIssueFailure(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if _, err := svc.Register(ctx, "partial@example.com", "password123", ""); err == nil || errors.Is(err, apperr.ErrEmailTaken) {
-		t.Fatalf("签发失败应上抛原始错误，得到 %v", err)
+	if _, err := svc.Register(ctx, dto.RegisterInput{Email: "partial@example.com", Password: "password123", Nickname: ""}); !apperr.CodeIs(err, apperr.ErrInternal) || !errors.Is(err, saveErr) {
+		t.Fatalf("签发失败应为 internal_error 并保留原始原因，得到 %v", err)
 	}
 	// 用户已落库：同邮箱重试注册命中唯一冲突。
-	if _, err := svc.Register(ctx, "partial@example.com", "password123", ""); !errors.Is(err, apperr.ErrEmailTaken) {
+	if _, err := svc.Register(ctx, dto.RegisterInput{Email: "partial@example.com", Password: "password123", Nickname: ""}); !errors.Is(err, apperr.ErrEmailTaken) {
 		t.Fatalf("重试注册应 ErrEmailTaken，得到 %v", err)
 	}
 	// 换正常 refresh 仓储（共享同一 users 假件）：签发失败后的用户可用原密码登录。
@@ -133,7 +132,7 @@ func TestRegisterIssueFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("构造服务失败: %v", err)
 	}
-	if login, err := okSvc.Login(ctx, "partial@example.com", "password123"); err != nil || login.User.ID == 0 {
+	if login, err := okSvc.Login(ctx, dto.LoginInput{Email: "partial@example.com", Password: "password123"}); err != nil || login.User.ID == 0 {
 		t.Fatalf("签发失败后的用户应可登录，得到 %v %v", login.User, err)
 	}
 }
@@ -142,11 +141,11 @@ func TestRefreshExpired(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newTestService(t, -time.Second) // TTL 为负：立即过期
 
-	reg, err := svc.Register(ctx, "bob@example.com", "password123", "")
+	reg, err := svc.Register(ctx, dto.RegisterInput{Email: "bob@example.com", Password: "password123", Nickname: ""})
 	if err != nil {
 		t.Fatalf("注册失败: %v", err)
 	}
-	if _, err := svc.Refresh(ctx, reg.Tokens.Refresh); !errors.Is(err, apperr.ErrUnauthorized) {
+	if _, err := svc.Refresh(ctx, dto.RefreshInput{RefreshToken: reg.Tokens.Refresh}); !errors.Is(err, apperr.ErrUnauthorized) {
 		t.Fatalf("过期刷新应 ErrUnauthorized，得到 %v", err)
 	}
 }
@@ -159,7 +158,7 @@ func TestJWTRejectsWrongKeyAndAlg(t *testing.T) {
 	if err != nil {
 		t.Fatalf("签发失败: %v", err)
 	}
-	if _, err := svc.Authenticate(tok); !errors.Is(err, apperr.ErrUnauthorized) {
+	if _, err := svc.Authenticate(context.Background(), dto.AuthenticateInput{AccessToken: tok}); !errors.Is(err, apperr.ErrUnauthorized) {
 		t.Fatalf("伪造 token 应 ErrUnauthorized，得到 %v", err)
 	}
 }

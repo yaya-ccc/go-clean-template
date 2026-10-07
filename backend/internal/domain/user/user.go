@@ -17,11 +17,10 @@ type User struct {
 
 // Repository 是用户实体的仓储契约，由基础设施层实现。
 // 错误契约：
-//   - Find 类查询未命中不是错误：返回 (nil, nil)，由应用层按用例产出事实码
-//     （ErrUserNotFound）后表现层合码。
+//   - Find 类查询未命中不是错误：返回 (nil, nil)，由应用层按用例决定最终语义。
 //   - 写入唯一冲突：由仓储边界分类直接产出业务码
 //     （邮箱唯一索引冲突 → email_taken），调用方透传即可。
-//   - 读写未知失败与未识别的写入拒绝：返回 database_error，保留原始 cause。
+//   - 读写未知失败与未识别的写入拒绝：返回 internal_error，保留原始 cause。
 type Repository interface {
 	// Create 持久化新用户；唯一冲突按上述契约返回；created_at 在应用侧生成，
 	// 插入后无需回读。

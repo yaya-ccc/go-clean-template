@@ -2,7 +2,7 @@
 // 供应用层与表现层测试共享。
 //
 // 错误形态与 MySQL 仓储对齐：Create 冲突返回业务码 email_taken；Find 未命中
-// 返回 (nil, nil)；伪造数据库故障返回 database_error。
+// 返回 (nil, nil)；伪造数据库故障返回 internal_error。
 package fakes
 
 import (
@@ -59,13 +59,13 @@ func (m *Users) FindByID(_ context.Context, id int64) (*user.User, error) {
 	return nil, nil
 }
 
-// UnknownDupUsers 在 Users 之上把 Create 替换为 database_error：
+// UnknownDupUsers 在 Users 之上把 Create 替换为 internal_error：
 // 白名单外的写入冲突经仓储边界分类统一归入数据库故障，应用层透传。
 type UnknownDupUsers struct{ *Users }
 
-// Create 恒返回 database_error，模拟未被索引白名单识别的重复键。
+// Create 恒返回 internal_error，模拟未被索引白名单识别的重复键。
 func (m *UnknownDupUsers) Create(_ context.Context, email, hash, nickname string) (*user.User, error) {
-	return nil, apperr.ErrDatabase.With("fake.user.create")
+	return nil, apperr.ErrInternal.With("fake.user.create")
 }
 
 // RefreshTokens 是 user.RefreshTokenRepository 的内存假件；并发安全。
@@ -115,5 +115,13 @@ func NewFailingRefreshTokens(err error) *FailingRefreshTokens {
 	return &FailingRefreshTokens{RefreshTokens: NewRefreshTokens(), err: err}
 }
 
-// Save 恒返回注入的错误。
-func (m *FailingRefreshTokens) Save(_ context.Context, t user.RefreshToken) error { return m.err }
+// Save 保持真实仓储的错误契约，注入的裸错误在此转换，已分类错误不重复包装。
+func (m *FailingRefreshTokens) Save(_ context.Context, t user.RefreshToken) error {
+	if m.err == nil {
+		return nil
+	}
+	if _, ok := apperr.First(m.err); ok {
+		return m.err
+	}
+	return apperr.ErrInternal.With("fake.refresh.save", apperr.WithCause(m.err))
+}

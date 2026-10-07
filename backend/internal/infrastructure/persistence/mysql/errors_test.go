@@ -36,7 +36,7 @@ func TestTranslateUserCreateDuplicate(t *testing.T) {
 		}
 	}
 	// 白名单外的重复键（PRIMARY、其它表同名索引、未知索引、重复值含索引名）
-	// 一律 database_error，不猜字段。
+	// 一律 internal_error，不猜字段。
 	for name, err := range map[string]error{
 		"主键冲突":          dupErr("uq_users_email", "PRIMARY"),
 		"重复值包含索引名":      dupErr("x for key 'uq_users_email'", "PRIMARY"),
@@ -44,31 +44,31 @@ func TestTranslateUserCreateDuplicate(t *testing.T) {
 		"未知索引":          dupErr("x", "idx_new"),
 		"缺 SQLState 伪造": &drivermysql.MySQLError{Number: 1062, Message: "Duplicate entry 'a' for key 'uq_users_email'"},
 	} {
-		if got := translateUserCreateError(err); !apperr.CodeIs(got, apperr.ErrDatabase) {
-			t.Fatalf("%s 应为 database_error，得到 %s", name, apperr.CodeOf(got))
+		if got := translateUserCreateError(err); !apperr.CodeIs(got, apperr.ErrInternal) {
+			t.Fatalf("%s 应为 internal_error，得到 %s", name, apperr.CodeOf(got))
 		}
 	}
 }
 
 func TestTranslateUserCreateNonDuplicate(t *testing.T) {
-	// 非 1062 驱动错误同样归入 database_error。
+	// 非 1062 驱动错误同样归入 internal_error。
 	other := &drivermysql.MySQLError{Number: 1045, SQLState: [5]byte{'2', '8', '0', '0', '0'}, Message: "denied"}
-	if got := translateUserCreateError(other); !apperr.CodeIs(got, apperr.ErrDatabase) {
-		t.Fatalf("非 1062 应为 database_error，得到 %s", apperr.CodeOf(got))
+	if got := translateUserCreateError(other); !apperr.CodeIs(got, apperr.ErrInternal) {
+		t.Fatalf("非 1062 应为 internal_error，得到 %s", apperr.CodeOf(got))
 	}
 }
 
 func TestNormalizeStoreErrorContext(t *testing.T) {
 	wrapped := fmt.Errorf("query: %w", context.Canceled)
-	if got := normalizeStoreError(wrapped, "op"); !apperr.CodeIs(got, apperr.ErrRequestCanceled) {
-		t.Fatalf("取消应保留分类，得到 %s", apperr.CodeOf(got))
+	if got := normalizeStoreError(wrapped, "op"); !apperr.CodeIs(got, apperr.ErrInternal) || !errors.Is(got, context.Canceled) {
+		t.Fatalf("取消应归为 internal_error 并保留原因，得到 %v", got)
 	}
 	deadline := fmt.Errorf("query: %w", context.DeadlineExceeded)
-	if got := normalizeStoreError(deadline, "op"); !apperr.CodeIs(got, apperr.ErrOperationTimeout) {
-		t.Fatalf("超时应保留分类，得到 %s", apperr.CodeOf(got))
+	if got := normalizeStoreError(deadline, "op"); !apperr.CodeIs(got, apperr.ErrInternal) || !errors.Is(got, context.DeadlineExceeded) {
+		t.Fatalf("超时应归为 internal_error 并保留原因，得到 %v", got)
 	}
-	if got := normalizeStoreError(errors.New("conn refused"), "op"); !apperr.CodeIs(got, apperr.ErrDatabase) {
-		t.Fatalf("未知失败应为 database_error，得到 %s", apperr.CodeOf(got))
+	if got := normalizeStoreError(errors.New("conn refused"), "op"); !apperr.CodeIs(got, apperr.ErrInternal) {
+		t.Fatalf("未知失败应为 internal_error，得到 %s", apperr.CodeOf(got))
 	}
 	if normalizeStoreError(nil, "op") != nil {
 		t.Fatal("nil 输入应返回 nil")
@@ -76,7 +76,7 @@ func TestNormalizeStoreErrorContext(t *testing.T) {
 }
 
 // TestIndexContract 钉住仓储边界分类的索引常量与 po 的 uniqueIndex tag 字面量一致，
-// 防止 po 侧改名后分类静默漂移到 database_error。
+// 防止 po 侧改名后分类静默漂移到 internal_error。
 func TestIndexContract(t *testing.T) {
 	f, ok := reflect.TypeOf(po.User{}).FieldByName("Email")
 	if !ok {

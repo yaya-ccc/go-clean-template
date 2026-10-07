@@ -5,14 +5,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	authapp "go-clean-template/backend/internal/application/auth"
 	"go-clean-template/backend/internal/domain/user/fakes"
 	"go-clean-template/backend/internal/presentation/api/auth"
+	"go-clean-template/backend/internal/presentation/middleware"
 
 	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
 )
 
 // newRouter 构造挂载真实 auth 路由与应用服务的测试引擎：
@@ -21,6 +24,7 @@ func newRouter(t *testing.T) *gin.Engine {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
+	r.Use(middleware.ProcessLog(zap.NewNop()), middleware.ZapRecovery(zap.NewNop()))
 	api := r.Group("/api/auth")
 	svc, err := authapp.NewService(
 		fakes.NewUsers(), fakes.NewRefreshTokens(), authapp.NewJWTIssuer("test-secret"),
@@ -47,14 +51,18 @@ func postRegister(t *testing.T, r *gin.Engine, body string) (int, map[string]any
 	return w.Code, b
 }
 
-// TestRegisterValidationAtEdge 校验注册校验全部在表现层生效：
+// TestRegisterValidationAtEdge 校验协议与内容规则最终都在 HTTP 出口得到受控响应：
 // 坏邮箱、短密码、超 72 字节密码均 400 invalid_input，且响应不含字段级细节。
 func TestRegisterValidationAtEdge(t *testing.T) {
 	r := newRouter(t)
 	for _, body := range []string{
-		`{"email":"not-an-email","password":"password123"}`,                       // 坏邮箱
-		`{"email":"a@example.com","password":"short"}`,                            // 短密码
-		`{"email":"a@example.com","password":"` + string(make([]byte, 73)) + `"}`, // 超 72 字节（含 NUL 字节）
+		`{"email":"not-an-email","password":"password123"}`,
+		`{"email":"a@example.com","password":"short"}`,
+		`{"email":"a@example.com","password":"` + strings.Repeat("x", 73) + `"}`,
+		`{"email":"a@example.com","password":"` + strings.Repeat("你", 25) + `"}`,
+		`{"email":"a@example.com","password":"password123","nickname":"` + strings.Repeat("你", 65) + `"}`,
+		`not json`,
+		`{}`,
 	} {
 		code, b := postRegister(t, r, body)
 		if code != http.StatusBadRequest {
@@ -69,8 +77,7 @@ func TestRegisterValidationAtEdge(t *testing.T) {
 	}
 }
 
-// TestRegisterNormalizesEmail 校验注册成功路径：表现层归一化邮箱（trim + 小写）后
-// 应用层收到小写真值；成功响应 data 直接作响应体，无信封包裹。
+// TestRegisterNormalizesEmail 校验用例归一化后的邮箱经协议视图返回，成功响应不包信封。
 func TestRegisterNormalizesEmail(t *testing.T) {
 	r := newRouter(t)
 	w := httptest.NewRecorder()

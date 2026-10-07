@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"go-clean-template/backend/internal/application/auth"
+	authdto "go-clean-template/backend/internal/application/auth/dto"
 	"go-clean-template/backend/internal/kernel/apperr"
 	"go-clean-template/backend/internal/kernel/applog"
 	"go-clean-template/backend/internal/presentation/response"
@@ -25,9 +26,6 @@ const requestIDHeader = "X-Request-Id"
 // bearerPrefix 是 Authorization 头中 access token 的前缀。
 const bearerPrefix = "Bearer "
 
-// userIDKey 是请求上下文中存放已认证用户 ID 的键。
-const userIDKey = "auth_user_id"
-
 // ProcessLog 是过程日志中间件：生成请求标识、挂过程数据收集器，请求结束时输出单行摘要。
 // 级别映射：2xx/3xx Info、4xx Warn、5xx Error；/healthz 成功降噪跳过、失败仍记录。
 // 错误链经 applog.ErrorFields 编码：error_chain + 链尾 cause 原文。
@@ -35,20 +33,19 @@ func ProcessLog(logger *zap.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestID := newRequestID()
 		c.Header(requestIDHeader, requestID)
+		withRequestID(c, requestID)
 		c.Request = c.Request.WithContext(applog.NewCollector(c.Request.Context()))
 		start := time.Now()
 
 		c.Next()
 
-		// 兜底：handler 漏写响应时补 500，挂 c.Error 供摘要日志归因；
-		// 裸签名 handler 后这是「忘写成功/错误响应」的唯一防线。
-		if !c.Writer.Written() {
-			_ = c.Error(apperr.ErrInternal.With("handler wrote no response"))
-			response.WriteInternal(c)
+		// 只兜底仍有效的框架级裸 handler，取消请求不补写 JSON。
+		if !c.Writer.Written() && c.Request.Context().Err() == nil {
+			response.Fail(c, apperr.ErrInternal.With("handler wrote no response"), requestID)
 		}
 
-		// /healthz 成功时降噪跳过；失败仍须可见。
-		if c.Request.URL.Path == "/healthz" && c.Writer.Status() == http.StatusOK {
+		// /healthz 仅正常成功时降噪，取消请求不能被默认 200 掩盖。
+		if c.Request.URL.Path == "/healthz" && c.Writer.Status() == http.StatusOK && c.Request.Context().Err() == nil {
 			return
 		}
 
@@ -99,14 +96,12 @@ func ProcessLog(logger *zap.Logger) gin.HandlerFunc {
 // newRequestID 生成 16 hex 字符的随机请求标识。
 func newRequestID() string {
 	b := make([]byte, 8)
-	if _, err := rand.Read(b); err != nil {
-		// crypto/rand 失败极罕见（系统熵源故障）；退化为时间戳保证请求标识仍唯一可定位。
-		return time.Now().Format("20060102150405.000000000")
-	}
+	// Go 1.26 的 rand.Read 在熵源故障时终止进程，不会返回可恢复错误。
+	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
 
-// ZapRecovery 恢复 handler panic，以 zap 输出堆栈（与业务错误同构的 {code,message} JSON）。
+// ZapRecovery 恢复 handler panic，以 zap 输出堆栈和同源请求标识。
 // http.ErrAbortHandler 向 net/http 传播中止语义而非吞掉；已写响应则不再追加第二份 JSON。
 func ZapRecovery(logger *zap.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -119,12 +114,12 @@ func ZapRecovery(logger *zap.Logger) gin.HandlerFunc {
 				panic(rec) // 保留 net/http 的中止哨兵语义
 			}
 			logger.Error("panic",
-				zap.String("request_id", c.GetString(requestIDHeader)),
+				zap.String("request_id", RequestIDFrom(c)),
 				zap.Any("recover", rec),
 				zap.ByteString("stack", debug.Stack()),
 			)
 			if !c.Writer.Written() {
-				response.WriteInternal(c)
+				response.WriteInternal(c, RequestIDFrom(c))
 			}
 		}()
 		c.Next()
@@ -136,27 +131,17 @@ func RequireAuth(svc *auth.Service) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := c.GetHeader("Authorization")
 		if !strings.HasPrefix(header, bearerPrefix) {
-			response.Fail(c, apperr.ErrUnauthorized.With("missing bearer token"))
+			response.Fail(c, apperr.ErrUnauthorized.With("missing bearer token"), RequestIDFrom(c))
 			c.Abort()
 			return
 		}
-		userID, err := svc.Authenticate(strings.TrimPrefix(header, bearerPrefix))
+		userID, err := svc.Authenticate(c.Request.Context(), authdto.AuthenticateInput{AccessToken: strings.TrimPrefix(header, bearerPrefix)})
 		if err != nil {
-			response.Fail(c, err)
+			response.Fail(c, err, RequestIDFrom(c))
 			c.Abort()
 			return
 		}
-		c.Set(userIDKey, userID)
+		withUserID(c, userID)
 		c.Next()
 	}
-}
-
-// CurrentUserID 从请求上下文取已认证用户 ID；仅在 RequireAuth 之后调用。
-func CurrentUserID(c *gin.Context) (int64, bool) {
-	id, ok := c.Get(userIDKey)
-	if !ok {
-		return 0, false
-	}
-	userID, ok := id.(int64)
-	return userID, ok
 }

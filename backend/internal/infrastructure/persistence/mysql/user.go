@@ -26,7 +26,7 @@ func NewUserRepo(db *gorm.DB) (*UserRepo, error) {
 // Create 插入新用户；created_at 由 autoCreateTime 在应用侧生成并随 INSERT 携带
 // （GORM 自动回填内存值，无需回读)）。
 // 唯一冲突由 translateUserCreateError 直接分类业务码（邮箱索引 → email_taken，
-// 未识别重复键与数据库故障 → database_error)）。
+// 未识别重复键与数据库故障 → internal_error）。
 func (r *UserRepo) Create(ctx context.Context, email, passwordHash, nickname string) (*user.User, error) {
 	// created_at 列为秒级 timestamp，MySQL 对小数秒四舍五入会进位到下一秒；
 	// 预置秒级截断值（autoCreateTime 对非零值不覆盖），保证内存值、库内值
@@ -50,8 +50,8 @@ func (r *UserRepo) FindByID(ctx context.Context, id int64) (*user.User, error) {
 	return r.findOne(ctx, r.db, "id = ?", id)
 }
 
-// findOne 执行单行查询并扫描为用户；无行返回 (nil, nil)，未命中事实由应用层
-// 判空产出，未知失败经归一化。
+// findOne 执行单行查询并扫描为用户；无行返回 (nil, nil)，由应用层决定语义，
+// 未知失败经归一化。
 func (r *UserRepo) findOne(ctx context.Context, db *gorm.DB, query string, arg any) (*user.User, error) {
 	var p po.User
 	err := db.WithContext(ctx).Where(query, arg).First(&p).Error

@@ -7,8 +7,7 @@ package apperr
 // 声明集中在 codes.go 单一注册表；调用点不再手写 code 字符串。
 type ErrCode string
 
-// Error 让 ErrCode 自身满足 error 接口，供哨兵直接返回；
-// 输出即裸 code，无操作上下文（上下文由 With 派生的 *Error 携带）。
+// Error 让 ErrCode 可作为 errors.Is 的匹配目标；实际错误用 With 构造以保留操作上下文。
 func (c ErrCode) Error() string { return string(c) }
 
 // With 从错误码派生带操作上下文的项目错误；opts 附加原始因或类型化 detail。
@@ -51,7 +50,7 @@ func (e *Error) Unwrap() error { return e.cause }
 
 // Is 实现同码即匹配：只要 target 也是同码错误（*Error 或裸 ErrCode）即视为同一错误，
 // 消除「同一 code 多个指针」导致的 errors.Is 静默失败。
-// 注意 errors.Is 会沿链匹配：应用包装后的错误仍可同时命中内层事实码，
+// 注意 errors.Is 会沿链匹配：应用包装后的错误仍可同时命中内层旧语义，
 // 按当前语义分支应使用 CodeIs。
 func (e *Error) Is(target error) bool {
 	switch t := target.(type) {

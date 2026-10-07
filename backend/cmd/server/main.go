@@ -25,27 +25,27 @@ func main() {
 	logger := applog.L()
 	g, err := mysql.Open(cfg.MySQLDSN)
 	if err != nil {
-		logger.Fatal("打开数据库失败", zap.Error(err))
+		logger.Fatal("打开数据库失败", applog.ErrorFields(err)...)
 	}
 	sqlDB, err := mysql.SQLDB(g)
 	if err != nil {
-		logger.Fatal("取回数据库句柄失败", zap.Error(err))
+		logger.Fatal("取回数据库句柄失败", applog.ErrorFields(err)...)
 	}
 	defer sqlDB.Close()
 
 	// schema 唯一来源是 po + AutoMigrate；启动时同步，失败即退出。
 	if err := mysql.Migrate(g); err != nil {
-		logger.Fatal("数据库迁移失败", zap.Error(err))
+		logger.Fatal("数据库迁移失败", applog.ErrorFields(err)...)
 	}
 
 	// 组装根：repo → 应用服务 → 路由依赖，表现层只收现成依赖；依赖缺失即启动失败。
 	userRepo, err := mysql.NewUserRepo(g)
 	if err != nil {
-		logger.Fatal("构造用户仓储失败", zap.Error(err))
+		logger.Fatal("构造用户仓储失败", applog.ErrorFields(err)...)
 	}
 	refreshRepo, err := mysql.NewRefreshTokenRepo(g)
 	if err != nil {
-		logger.Fatal("构造刷新凭据仓储失败", zap.Error(err))
+		logger.Fatal("构造刷新凭据仓储失败", applog.ErrorFields(err)...)
 	}
 	authSvc, err := authapp.NewService(
 		userRepo,
@@ -57,11 +57,11 @@ func main() {
 		},
 	)
 	if err != nil {
-		logger.Fatal("构造认证服务失败", zap.Error(err))
+		logger.Fatal("构造认证服务失败", applog.ErrorFields(err)...)
 	}
 	userSvc, err := userapp.NewService(userRepo)
 	if err != nil {
-		logger.Fatal("构造用户服务失败", zap.Error(err))
+		logger.Fatal("构造用户服务失败", applog.ErrorFields(err)...)
 	}
 	handler, err := router.New(router.Deps{
 		DB:         sqlDB,
@@ -70,7 +70,7 @@ func main() {
 		RefreshTTL: cfg.RefreshTTL,
 	})
 	if err != nil {
-		logger.Fatal("组装路由失败", zap.Error(err))
+		logger.Fatal("组装路由失败", applog.ErrorFields(err)...)
 	}
 
 	srv := &http.Server{
@@ -83,7 +83,7 @@ func main() {
 	go func() {
 		logger.Info("listening", zap.String("addr", cfg.Addr))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Fatal("HTTP 服务异常退出", zap.Error(err))
+			logger.Fatal("HTTP 服务异常退出", applog.ErrorFields(err)...)
 		}
 	}()
 
@@ -91,7 +91,7 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		logger.Error("优雅停机未完成，强制结束", zap.Error(err))
+		logger.Error("优雅停机未完成，强制结束", applog.ErrorFields(err)...)
 	}
 	logger.Info("server stopped")
 }
