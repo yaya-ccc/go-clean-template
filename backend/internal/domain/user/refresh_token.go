@@ -17,7 +17,7 @@ type RefreshToken struct {
 // RefreshTokenRepository 是刷新凭据的仓储契约，由基础设施层实现。
 // 错误契约：Find 未命中不是错误，返回 (nil, nil)；
 // Delete 区分「无记录删除」（幂等成功）与「存储故障」（返回错误）；
-// 未知失败统一 database_error 并保留原始 cause。
+// 未知失败统一 internal_error 并保留原始 cause。
 type RefreshTokenRepository interface {
 	// Save 写入一条刷新凭据。
 	Save(ctx context.Context, t RefreshToken) error

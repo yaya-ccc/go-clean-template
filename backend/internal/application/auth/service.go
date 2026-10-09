@@ -72,12 +72,22 @@ func NewService(
 // 邮箱唯一性由唯一索引在写入时判定，冲突经仓储边界分类直接产出 email_taken。
 // 注册不包事务：用户创建成功即既成事实，其后签发失败只上抛错误、不回滚；
 // 用户重试注册会得到 email_taken，转登录即可。
-func (s *Service) Register(ctx context.Context, email, password, nickname string) (dto.AuthResult, error) {
-	// 入参已由表现层完整校验并归一化，本用例信任入参直接编排。
+func (s *Service) Register(ctx context.Context, in dto.RegisterInput) (dto.AuthResult, error) {
+	email, ok := user.NormalizeEmail(in.Email)
+	if !ok {
+		return dto.AuthResult{}, apperr.ErrInvalidInput.With("auth.register.email_invalid")
+	}
+	if err := user.ValidatePassword(in.Password); err != nil {
+		return dto.AuthResult{}, err
+	}
+	nickname := in.Nickname
 	if nickname == "" {
 		nickname = emailPrefix(email)
 	}
-	hash, err := hashPassword(password, s.cfg.BCryptCost)
+	if err := user.ValidateNickname(nickname); err != nil {
+		return dto.AuthResult{}, err
+	}
+	hash, err := hashPassword(in.Password, s.cfg.BCryptCost)
 	if err != nil {
 		return dto.AuthResult{}, err
 	}
@@ -93,9 +103,10 @@ func (s *Service) Register(ctx context.Context, email, password, nickname string
 }
 
 // Login 校验邮箱密码，返回用户视图与令牌对。
-// 未命中与密码错误均产出事实/语义码后由表现层合码为 bad_credentials。
-func (s *Service) Login(ctx context.Context, email, password string) (dto.AuthResult, error) {
-	// 入参已由表现层归一化；非法邮箱不在此拒绝，查询自然未命中保持不可区分。
+// 邮箱不存在与密码错误在用例内同产 bad_credentials，不依赖 HTTP 入口合码。
+func (s *Service) Login(ctx context.Context, in dto.LoginInput) (dto.AuthResult, error) {
+	// 非法邮箱只归一化不拒绝，查询自然未命中，保持与坏密码不可区分。
+	email, _ := user.NormalizeEmail(in.Email)
 	u, err := s.users.FindByEmail(ctx, email)
 	if err != nil {
 		return dto.AuthResult{}, err
@@ -103,15 +114,16 @@ func (s *Service) Login(ctx context.Context, email, password string) (dto.AuthRe
 	if u == nil {
 		// 与命中用户走同代价的 bcrypt 比对拉平响应时间，堵住「查无此人立即返回」
 		// 的时间侧信道（用户枚举)）。
-		_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(password))
-		return dto.AuthResult{}, apperr.ErrUserNotFound.With("login email not found")
+		_ = bcrypt.CompareHashAndPassword([]byte(dummyHash), []byte(in.Password))
+		return dto.AuthResult{}, apperr.ErrBadCredentials.With("login email not found")
 	}
-	if err := verifyPassword(u.PasswordHash, password); err != nil {
+	if err := verifyPassword(u.PasswordHash, in.Password); err != nil {
 		if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
 			return dto.AuthResult{}, apperr.ErrBadCredentials.With("login password mismatch")
 		}
-		// 库中哈希损坏、不受支持的版本/代价等：内部故障，不谎称用户输错密码。
-		return dto.AuthResult{}, err
+		// 库中哈希损坏、不受支持的版本/代价等：在第三方调用边界转换，
+		// 不裸抛，也不谎称用户输错密码。
+		return dto.AuthResult{}, apperr.ErrInternal.With("auth.login.verify_password", apperr.WithCause(err))
 	}
 	pair, err := s.issuePair(ctx, u.ID)
 	if err != nil {
@@ -120,9 +132,10 @@ func (s *Service) Login(ctx context.Context, email, password string) (dto.AuthRe
 	return dto.AuthResult{User: u, Tokens: pair}, nil
 }
 
-// Refresh 用刷新凭据换新令牌对；未命中或过期均由表现层合码为 unauthorized。
+// Refresh 用刷新凭据换新令牌对；未命中或过期在用例内统一为 unauthorized。
 // 过期凭据的惰性清理失败只记日志，不改变主结果。
-func (s *Service) Refresh(ctx context.Context, rawToken string) (user.TokenPair, error) {
+func (s *Service) Refresh(ctx context.Context, in dto.RefreshInput) (user.TokenPair, error) {
+	rawToken := in.RefreshToken
 	if rawToken == "" {
 		return user.TokenPair{}, apperr.ErrUnauthorized.With("empty refresh token")
 	}
@@ -132,7 +145,7 @@ func (s *Service) Refresh(ctx context.Context, rawToken string) (user.TokenPair,
 		return user.TokenPair{}, err
 	}
 	if stored == nil {
-		return user.TokenPair{}, apperr.ErrRefreshTokenNotFound.With("refresh token not found")
+		return user.TokenPair{}, apperr.ErrUnauthorized.With("refresh token not found")
 	}
 	if time.Now().After(stored.ExpiresAt) {
 		if derr := s.refresh.Delete(ctx, tokenHash); derr != nil { // 惰性清理：附带诊断事件
@@ -147,13 +160,13 @@ func (s *Service) Refresh(ctx context.Context, rawToken string) (user.TokenPair,
 // Authenticate 校验 access token 还原用户 ID，供需要登录的接口复用。
 // 错误分类由 TokenIssuer 契约保证：凭据无效 unauthorized，内部故障原样上抛
 // ；此处不重新包装已封装好的错误。
-func (s *Service) Authenticate(token string) (int64, error) {
-	return s.tokens.Parse(token)
+func (s *Service) Authenticate(_ context.Context, in dto.AuthenticateInput) (int64, error) {
+	return s.tokens.Parse(in.AccessToken)
 }
 
 // Logout 吊销刷新凭据；凭据本就不存在时也视为成功（幂等），存储故障原样返回。
-func (s *Service) Logout(ctx context.Context, rawToken string) error {
-	return s.refresh.Delete(ctx, hashToken(rawToken))
+func (s *Service) Logout(ctx context.Context, in dto.LogoutInput) error {
+	return s.refresh.Delete(ctx, hashToken(in.RefreshToken))
 }
 
 // issuePair 同时签发 access 与 refresh；refresh 明文只出现一次，库中只存哈希。
@@ -178,7 +191,7 @@ func (s *Service) issuePair(ctx context.Context, userID int64) (user.TokenPair, 
 }
 
 // emailPrefix 取邮箱 @ 前部分作为默认昵称；无 @ 时以原串兜底而非 panic——
-// '@' 存在这一不变量由表现层邮箱格式校验保证，此处不信任入参。
+// '@' 存在这一不变量由注册用例的邮箱校验保证。
 func emailPrefix(email string) string {
 	if prefix, _, ok := strings.Cut(email, "@"); ok {
 		return prefix
@@ -187,7 +200,7 @@ func emailPrefix(email string) string {
 }
 
 // hashPassword 用 bcrypt 生成密码哈希；cost 为 0 时使用库默认值。
-// 输入长度已由表现层校验，此处失败即为内部故障。
+// 输入长度已由注册用例调用领域规则校验，此处失败即为内部故障。
 func hashPassword(password string, cost int) (string, error) {
 	h, err := bcrypt.GenerateFromPassword([]byte(password), cost)
 	if err != nil {

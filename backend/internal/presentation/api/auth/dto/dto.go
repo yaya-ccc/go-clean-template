@@ -8,52 +8,32 @@ import (
 	"go-clean-template/backend/internal/kernel/apperr"
 )
 
-// 密码长度策略（产品常量写死于表现层，不经配置）：8 为产品最短要求，72 为 bcrypt 输入上限。
-// 按 UTF-8 字节计数而非字符：validator 标签按字符数，72 个多字节字符会穿透到 bcrypt 报内部错误。
-const (
-	minPasswordBytes = 8
-	maxPasswordBytes = 72
-)
-
-// RegisterRequest 注册请求体；自持 Validate 完成全部校验与邮箱归一化。
+// RegisterRequest 只描述协议形状；认证内容规则在应用调用链内统一保证。
 type RegisterRequest struct {
 	Email    string `json:"email" binding:"required"`
 	Password string `json:"password" binding:"required"`
-	Nickname string `json:"nickname" binding:"max=64"`
+	Nickname string `json:"nickname"`
 }
 
-// Validate 校验注册请求体并就地归一化：邮箱格式与长度经 domain/user 单一真相判定，
-// 密码按字节限制在 [8,72]；失败原因只进日志（op），不透出到响应。
+// Validate 只守协议形状，不重复领域内容规则，也不改变请求字段。
 func (r *RegisterRequest) Validate() error {
 	if r == nil {
 		return apperr.ErrInvalidInput.With("register body empty")
 	}
-	email, ok := user.NormalizeEmail(r.Email)
-	if !ok {
-		return apperr.ErrInvalidInput.With("register email invalid")
-	}
-	r.Email = email
-	if n := len(r.Password); n < minPasswordBytes {
-		return apperr.ErrInvalidInput.With("register password too short")
-	} else if n > maxPasswordBytes {
-		return apperr.ErrInvalidInput.With("register password too long")
-	}
 	return nil
 }
 
-// LoginRequest 登录请求体；坏邮箱不在校验层拒绝，放行后由查询自然失败，
-// 保持与坏密码同为 bad_credentials、不可区分。
+// LoginRequest 不在协议层拒绝坏邮箱，由登录用例保持凭据语义不可区分。
 type LoginRequest struct {
 	Email    string `json:"email" binding:"required"`
 	Password string `json:"password" binding:"required"`
 }
 
-// Validate 仅做邮箱归一化写回；除空体外恒返回 nil。
+// Validate 不检查凭据内容，避免协议入口绕开登录用例的防枚举规则。
 func (r *LoginRequest) Validate() error {
 	if r == nil {
 		return apperr.ErrInvalidInput.With("login body empty")
 	}
-	r.Email, _ = user.NormalizeEmail(r.Email)
 	return nil
 }
 

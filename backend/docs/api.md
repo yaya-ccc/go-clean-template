@@ -1,4 +1,4 @@
-# 知岛后端接口文档
+# go-clean-template 后端接口文档
 
 ## 一、基础说明
 
@@ -14,11 +14,11 @@
 - **错误响应**：所有接口出错时统一返回：
 
   ```json
-  { "code": "错误码", "message": "用户可读的中文提示" }
+  { "code": "错误码", "message": "用户可读的中文提示", "request_id": "c1c1c1c1c1c1c1c1" }
   ```
 
   参数校验失败统一返回 400 `invalid_input`，不携带字段级细节；具体原因仅供服务端日志排查。
-  部分错误响应额外携带可选字段 `request_id`（与响应头 `X-Request-Id` 一致），示例：
+  所有错误响应固定携带 `request_id`（16 hex，与响应头 `X-Request-Id`、日志一致），示例：
 
   ```json
   {
@@ -34,14 +34,11 @@
   | `bad_credentials` | 401 | 邮箱或密码错误 |
   | `unauthorized` | 401 | 未登录 / 登录已过期，应引导重新登录 |
   | `email_taken` | 409 | 邮箱已被注册 |
-  | `internal_error` | 500 | 服务器内部错误 |
-  | `database_error` | 500 | 数据库故障；文案与 internal_error 相同，仅 code 可区分归因 |
-  | `service_unavailable` | 503 | 服务暂不可用（如健康检查探测数据库失败） |
-  | `operation_timeout` | 503 | 请求处理超时；**不承诺操作未生效**，不要盲目重试注册等写操作 |
+  | `internal_error` | 500 | 所有系统失败，包括数据库故障、依赖超时与探针失败 |
   | `route_not_found` | 404 | 请求的接口不存在 |
   | `method_not_allowed` | 405 | 请求方法不被该接口允许 |
 
-  未列举的错误码一律按 `internal_error` 处理。
+  未列举的错误码一律按 `internal_error` 处理。系统失败的细节只进日志；**不承诺操作未生效**，不要自动重试注册等写操作。请求已经取消时服务端不再写错误 JSON。
 
 ## 二、认证流程说明
 
@@ -78,7 +75,7 @@
 |---|---|---|---|
 | email | string | 是 | 邮箱格式；服务端去空白并转小写后作为账号标识 |
 | password | string | 是 | 最短 8 字节、最长 72 字节（bcrypt 输入上限，超出返回 400） |
-| nickname | string | 否 | 最长 64 字符；不传时默认取邮箱 @ 前部分 |
+| nickname | string | 否 | 最长 64 字符；不传时默认取邮箱 @ 前部分，前缀超长时需显式提供合规昵称 |
 
 **请求示例**
 
@@ -105,7 +102,7 @@
 **失败示例**
 
 ```json
-{ "code": "email_taken", "message": "邮箱已被注册" }
+{ "code": "email_taken", "message": "邮箱已被注册", "request_id": "c1c1c1c1c1c1c1c1" }
 ```
 
 ### 2. 登录
@@ -116,7 +113,7 @@
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| email | string | 是 | 邮箱格式 |
+| email | string | 是 | 去首尾空白并转小写；坏邮箱与密码错误均返回 bad_credentials |
 | password | string | 是 | 无长度要求 |
 
 **请求示例**
@@ -143,7 +140,7 @@
 **失败示例**
 
 ```json
-{ "code": "bad_credentials", "message": "邮箱或密码错误" }
+{ "code": "bad_credentials", "message": "邮箱或密码错误", "request_id": "c1c1c1c1c1c1c1c1" }
 ```
 
 ### 3. 刷新 access token
@@ -163,7 +160,7 @@ access token 过期后调用。**无需请求体**，浏览器自动携带 refre
 **失败响应**
 
 - 凭据缺失/无效/过期（`401 unauthorized`）：服务端会同时清除 refresh cookie，前端应跳转登录页。
-- 服务端故障（`503` / `500`）：**cookie 不会被清除**，服务恢复后用户可直接重试刷新，不应被登出。
+- 服务端故障（`500 internal_error`）：**cookie 不会被清除**，服务恢复后用户可直接重试刷新，不应被登出。
 
 ### 4. 登出
 
@@ -179,7 +176,7 @@ access token 过期后调用。**无需请求体**，浏览器自动携带 refre
 }
 ```
 
-**失败响应**（`503` / `500`）：服务端吊销失败，此时**不会清除 cookie**、不返回成功——
+**失败响应**（`500 internal_error`）：服务端吊销失败，此时**不会清除 cookie**、不返回成功——
 客户端应提示「登出未完成」而非「已安全退出」，用户可重试。
 
 ### 5. 获取当前用户信息
@@ -200,7 +197,7 @@ access token 过期后调用。**无需请求体**，浏览器自动携带 refre
 **失败示例**
 
 ```json
-{ "code": "unauthorized", "message": "登录已过期，请重新登录" }
+{ "code": "unauthorized", "message": "登录已过期，请重新登录", "request_id": "c1c1c1c1c1c1c1c1" }
 ```
 
 ### 6. 健康检查
@@ -215,10 +212,10 @@ access token 过期后调用。**无需请求体**，浏览器自动携带 refre
 }
 ```
 
-**失败响应 503**（数据库不可用，`service_unavailable`）
+**失败响应 500**（数据库不可用或探测超时，`internal_error`）
 
 ```json
-{ "code": "service_unavailable", "message": "服务暂不可用" }
+{ "code": "internal_error", "message": "服务器内部错误", "request_id": "c1c1c1c1c1c1c1c1" }
 ```
 
 ## 四、调用示例（curl）
